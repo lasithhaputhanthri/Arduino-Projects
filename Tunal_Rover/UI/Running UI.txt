@@ -1,0 +1,56 @@
+### Step 1: **Install Required Software**
+1. Ensure Python is installed on your system (preferably version 3.7 or later).
+2. Install the required Python packages:
+   - Open a terminal or command prompt.
+   - Run the following command:
+     ```bash
+     pip install streamlit matplotlib
+     ```
+
+---
+
+### Step 2: **Prepare the Script**
+1. Copy the provided Python code into a new file.
+2. Save the file as `dashboard.py` (or any name you prefer, but ensure the `.py` extension is used).
+
+---
+
+### Step 3: **Run the Streamlit App**
+1. Navigate to the directory where the script is saved.
+   - Example (Windows):
+     ```bash
+     cd path\to\your\script
+     ```
+   - Example (Mac/Linux):
+     ```bash
+     cd /path/to/your/script
+     ```
+2. Run the Streamlit app using the following command:
+   ```bash
+   streamlit run dashboard.py
+   ```
+
+---
+
+### Step 4: **Open the Dashboard**
+1. After running the command, Streamlit will start a local web server.
+2. A browser window should automatically open with the dashboard.
+   - If it doesn’t, look for the URL displayed in the terminal (e.g., `http://localhost:8501`) and open it in your browser manually.
+
+---
+
+### Step 5: **Interact with the Dashboard**
+1. Observe real-time updates of dummy environmental data.
+2. Metrics for temperature, humidity, and gas level will update every second.
+3. View health statuses and plots for historical data trends.
+
+---
+
+### Step 6: **Stop the Dashboard**
+1. To stop the Streamlit app, return to the terminal and press `Ctrl+C`.
+
+---
+
+### Step 7: **Customize the Code (Optional)**
+- Adjust ranges or update styles as needed.
+- Explore and tweak the dummy data generation logic to suit your use case.

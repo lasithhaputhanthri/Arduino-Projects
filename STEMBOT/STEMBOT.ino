@@ -4,7 +4,7 @@
 #include <LiquidCrystal_I2C.h>
 
 // ========== Mode Handling ==========
-enum Mode { NO_MODE = 0, LINE_FOLLOW, OBSTACLE_AVOID, LINE_FOLLOW_WITH_ARM };
+enum Mode { NO_MODE = 0, LINE_FOLLOW, OBSTACLE_AVOID, LINE_FOLLOW_WITH_ARM, DISTANCE_MEASURE, MOTOR_CONTROL, LINE_DETECT, ROBOT_ARM };
 
 // LCD
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -43,6 +43,7 @@ const int MAX_PWM = 255;
 
 // Current mode
 Mode currentMode = NO_MODE;  // default is no mode until Start is pressed
+static Mode lastMode = NO_MODE;
 
 // ========== Button / Run State ==========
 bool patrolEnabled = false;
@@ -103,6 +104,10 @@ void driveMotors(int left, int right);
 void followLineMode();
 void obstacleAvoidMode();
 void lineFollowWithArmMode();
+void distanceMeasureMode();
+void motorControlMode();
+void lineDetectMode();
+
 
 bool isObstacleDetected();
 float readSensors();
@@ -111,6 +116,8 @@ bool isLineEnded();
 void turn180();
 void turnRight90();
 long readUltrasonicDistanceCM(int trigPin, int echoPin);
+// long readUltrasonicDistanceCM(int trigPin);
+float computeErrorWithDeadband(float position);
 
 // PID step
 void lineFollowPIDStep();
@@ -136,6 +143,10 @@ const char* modeShort(Mode m) {
     case LINE_FOLLOW:          return "LINE";
     case OBSTACLE_AVOID:       return "AVOID";
     case LINE_FOLLOW_WITH_ARM: return "ARM";
+    case DISTANCE_MEASURE: return "DISTANCE";
+    case MOTOR_CONTROL: return "MOTOR";
+    case LINE_DETECT: return "LINE";
+    case ROBOT_ARM: return "ROBOT_ARM";
     case NO_MODE:
     default:                   return "NONE";
   }
@@ -240,6 +251,22 @@ void loop() {
       Serial.println("LINE_FOLLOW_WITH_ARM");
       lineFollowWithArmMode();
       break;
+
+    case DISTANCE_MEASURE:
+      distanceMeasureMode();
+      break;
+
+    case MOTOR_CONTROL:
+      motorControlMode();
+      break;
+
+    case LINE_DETECT:
+      lineDetectMode();
+      break;
+
+    case ROBOT_ARM: 
+      break;
+
 
     case NO_MODE:
     default:
@@ -390,6 +417,7 @@ bool isLineEnded() {
 // ========== Ultrasonic / Obstacle ==========
 bool isObstacleDetected() {
   long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG, ULTRA_FRONT_ECHO);
+  //long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG);
   return (d > 0 && d < OBSTACLE_DISTANCE_CM);
 }
 
@@ -404,6 +432,24 @@ long readUltrasonicDistanceCM(int trigPin, int echoPin) {
   if (dur == 0) return -1;                  // no echo
   return (long)(dur * 0.034 / 2);           // in cm
 }
+
+// long readUltrasonicDistanceCM(int trigPin) {
+//   // Send 10µs trigger
+//   pinMode(trigPin, OUTPUT);
+//   digitalWrite(trigPin, LOW);
+//   delayMicroseconds(2);
+//   digitalWrite(trigPin, HIGH);
+//   delayMicroseconds(10);
+//   digitalWrite(trigPin, LOW);
+
+//   // Listen for echo on the same pin
+//   pinMode(trigPin, INPUT);
+//   // 30ms timeout ≈ ~5m max range (tweak if you like)
+//   unsigned long dur = pulseIn(trigPin, HIGH, 30000UL);
+//   if (dur == 0) return -1;               // no echo / timeout
+//   return (long)(dur * 0.034f / 2.0f);    // µs → cm
+// }
+
 
 // ====== Magnet Sensor: read & decode pattern (DIGITAL, active-LOW) ======
 uint8_t readMagPattern() {
@@ -422,11 +468,28 @@ Mode decodeMagPattern(uint8_t pattern) {
   }
 }
 
+// Mode decodeMagPattern(uint8_t pattern) {
+//   switch (pattern) {
+//     case 0b111: return LINE_FOLLOW;
+//     case 0b110: return OBSTACLE_AVOID;
+//     case 0b101: return LINE_FOLLOW_WITH_ARM;
+//     case 0b100: return DISTANCE_MEASURE;
+//     case 0b011: return MOTOR_CONTROL;
+//     case 0b010: return LINE_DETECT;
+//     case 0b001: return ROBOT_ARM;
+//     case 0b000: default: return NO_MODE;
+//   }
+// }
+
 const char* modeName(Mode m) {
   switch (m) {
     case LINE_FOLLOW:          return "LINE_FOLLOW";
     case OBSTACLE_AVOID:       return "OBSTACLE_AVOID";
     case LINE_FOLLOW_WITH_ARM: return "LINE_FOLLOW_WITH_ARM";
+    case DISTANCE_MEASURE: return "DISTANCE_MEASURE";
+    case MOTOR_CONTROL: return "MOTOR_CONTROL";
+    case LINE_DETECT: return "LINE_DETECT";
+    case ROBOT_ARM: return "ROBOT_ARM";
     case NO_MODE:
     default:                   return "NO_MODE";
   }
@@ -539,4 +602,172 @@ inline float computeErrorWithDeadband(float position) {
   if (position > centerR) return position - centerR;  // positive → turn right
   return 0.0f;  // between 3 and 4 → perfect center
 }
+
+void distanceMeasureMode() {
+  static bool first = true;
+  static unsigned long last = 0;
+  const unsigned long INTERVAL_MS = 200;  // update ~5 Hz
+
+  if (lastMode != currentMode) {
+    first = true;
+    lastMode = currentMode;
+  }
+
+
+  // Make sure motors are stopped and set up the LCD header once
+  if (first) {
+    stopmotors();
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Distance (cm)");
+    first = false;
+  }
+
+  unsigned long now = millis();
+  if (now - last >= INTERVAL_MS) {
+    last = now;
+
+    long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG, ULTRA_FRONT_ECHO);
+    //long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG);
+
+    // Serial debug
+    Serial.print("Distance: ");
+    Serial.print(d);
+    Serial.println(" cm");
+
+    // LCD line 2 (pad with spaces to clear old text)
+    lcd.setCursor(0, 1);
+    if (d < 0 || d > 400) {               // typical HC-SR04 useful range
+      lcd.print("Out of range    ");
+    } else {
+      char buf[17];
+      snprintf(buf, sizeof(buf), "%4ld cm         ", d);
+      lcd.print(buf);
+    }
+  }
+}
+void motorControlMode() {
+  // Tunables
+  const int MC_FWD_SPEED   = 190;    // 0..255
+  const int MC_BACK_SPEED  = -190;   // negative = reverse
+  const int MC_TURN_SPEED  = 190;    // in-place turns
+  const unsigned long MC_FWD_MS   = 700;
+  const unsigned long MC_BACK_MS  = 700;
+  const unsigned long MC_TURN_MS  = 600;
+  const unsigned long MC_PAUSE_MS = 250;
+
+  enum Phase : uint8_t {
+    FWD, PAUSE1, BACK, PAUSE2, LEFT_TURN, PAUSE3, RIGHT_TURN, PAUSE4
+  };
+
+  static bool first = true;
+  static Phase phase = FWD;
+  static unsigned long t0 = 0;
+
+  if (lastMode != currentMode) {
+    first = true;
+    lastMode = currentMode;
+  }
+
+
+  auto setPhase = [&](Phase p, const char* label){
+    phase = p;
+    t0 = millis();
+    // UI
+    Serial.println(label);
+    lcd.setCursor(0,0); lcd.print("Motor Test      ");
+    lcd.setCursor(0,1); 
+    lcd.print(label);
+    // pad to clear leftover chars on LCD line
+    int len = strlen(label);
+    for (int i = len; i < 16; ++i) lcd.print(' ');
+  };
+
+  if (first) {
+    stopmotors();
+    lcd.clear();
+    setPhase(FWD, "Forward");
+    first = false;
+  }
+
+  unsigned long now = millis();
+  switch (phase) {
+    case FWD:
+      driveMotors(MC_FWD_SPEED, MC_FWD_SPEED);
+      if (now - t0 >= MC_FWD_MS) { stopmotors(); setPhase(PAUSE1, "Pause"); }
+      break;
+
+    case PAUSE1:
+      stopmotors();
+      if (now - t0 >= MC_PAUSE_MS) { setPhase(BACK, "Backward"); }
+      break;
+
+    case BACK:
+      driveMotors(MC_BACK_SPEED, MC_BACK_SPEED);
+      if (now - t0 >= MC_BACK_MS) { stopmotors(); setPhase(PAUSE2, "Pause"); }
+      break;
+
+    case PAUSE2:
+      stopmotors();
+      if (now - t0 >= MC_PAUSE_MS) { setPhase(LEFT_TURN, "Turn Left"); }
+      break;
+
+    case LEFT_TURN:
+      driveMotors(-MC_TURN_SPEED, MC_TURN_SPEED); // left wheel back, right forward
+      if (now - t0 >= MC_TURN_MS) { stopmotors(); setPhase(PAUSE3, "Pause"); }
+      break;
+
+    case PAUSE3:
+      stopmotors();
+      if (now - t0 >= MC_PAUSE_MS) { setPhase(RIGHT_TURN, "Turn Right"); }
+      break;
+
+    case RIGHT_TURN:
+      driveMotors(MC_TURN_SPEED, -MC_TURN_SPEED); // left forward, right back
+      if (now - t0 >= MC_TURN_MS) { stopmotors(); setPhase(PAUSE4, "Pause"); }
+      break;
+
+    case PAUSE4:
+      stopmotors();
+      if (now - t0 >= MC_PAUSE_MS) { setPhase(FWD, "Forward"); } // loop
+      break;
+  }
+}
+
+void lineDetectMode() {
+  static bool first = true;
+  if (lastMode != currentMode) { first = true; lastMode = currentMode; }
+
+  // One-time LCD setup when entering this mode
+  if (first) {
+    stopmotors();
+    lcd.clear();
+    lcd.setCursor(0,0); lcd.print("IR:");
+    lcd.setCursor(0,1); lcd.print("pos:");   // label once
+    first = false;
+  }
+
+  // Update cached IR states/bits and weighted position
+  float pos = readSensors();  // updates irBits, irLastRaw, lastPosition
+
+  // Build an 8-char bit string (left → right; MSB = leftmost sensor)
+  char bitsStr[9];
+  for (int i = num_sensors - 1, k = 0; i >= 0; --i, ++k) {
+    bitsStr[k] = ((irBits >> i) & 1) ? '1' : '0';
+  }
+  bitsStr[8] = '\0';
+
+  // Update LCD without clearing the whole screen (avoids flicker)
+  lcd.setCursor(3, 0);           // after "IR:"
+  lcd.print(bitsStr);
+
+  lcd.setCursor(4, 1);           // after "pos:"
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%4.2f   ", pos);  // pad spaces to overwrite old
+  lcd.print(buf);
+
+  delay(150);  // throttle so the LCD stays readable
+}
+
+
 

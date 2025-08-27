@@ -2,6 +2,7 @@
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <esp32-hal-ledc.h>  // <-- added: LEDC pin-based API
 
 // ========== Mode Handling ==========
 enum Mode { NO_MODE = 0, LINE_FOLLOW, OBSTACLE_AVOID, LINE_FOLLOW_WITH_ARM, DISTANCE_MEASURE, MOTOR_CONTROL, LINE_DETECT, ROBOT_ARM };
@@ -28,18 +29,23 @@ const int motor_right_backward = 16;
 
 // Ultrasonic (front, dual-pin like HC-SR04)
 #define ULTRA_FRONT_TRIG 23
-#define ULTRA_FRONT_ECHO 15
+#define ULTRA_FRONT_ECHO 12
 #define OBSTACLE_DISTANCE_CM 15
 
 // ---- Magnet Sensor (2 digital channels, external pull-ups, active-LOW) ----
-#define MAG1_PIN 27   // LSB (bit0)
-#define MAG2_PIN 14   // MSB (bit1)
+#define MAG1_PIN 14 
+#define MAG2_PIN 27
+#define MAG3_PIN 15   
 
 // Black gives HIGHER ADC on your line sensors:
 const bool LINE_IS_BLACK = false;
 
 // ESP32 8-bit PWM range
 const int MAX_PWM = 255;
+
+// ---- added: LEDC PWM settings for motors (pin-based API) ----
+const uint32_t LEDC_MOTOR_FREQ = 1000; // 20 kHz (quiet)
+const uint8_t  LEDC_MOTOR_RES  = 8;     // duty 0..255
 
 // Current mode
 Mode currentMode = NO_MODE;  // default is no mode until Start is pressed
@@ -51,15 +57,17 @@ bool lastButtonState = HIGH;
 bool modeLocked = false;
 
 // ========== PID (UNCHANGED as requested) ==========
-float Kp = 70, Ki = 0, Kd = 50;
+float Kp =15, Ki = 0, Kd = 100;
 float error = 0, previous_error = 0;
 float integral = 0, derivative = 0;
 float correction = 0;
 
+int offsetleft=0;
+int offsetright=0;
 // ========== Drive / Boost ==========
-const int BASE_SPEED_NORMAL   = 160;
-const int BASE_SPEED_STARTING = 160;
-const int START_BOOST_DURATION_MS = 200;
+const int BASE_SPEED_NORMAL   = 105;
+const int BASE_SPEED_STARTING = 105;
+const int START_BOOST_DURATION_MS = 10;
 
 bool justStarted = true;
 unsigned long startBoostStartTime = 0;
@@ -68,8 +76,8 @@ unsigned long startBoostStartTime = 0;
 float lastPosition = (num_sensors - 1) / 2.0;  // center (3.5 with 8 sensors)
 
 // ----- Obstacle-Avoid tuning -----
-const int OA_FORWARD_SPEED = 255;
-const int TURN_RIGHT_SPEED = 200;
+const int OA_FORWARD_SPEED = 130;
+const int TURN_RIGHT_SPEED = 130;
 const int TURN_RIGHT_MS    = 1000;  // calibrate
 
 // For LINE_FOLLOW_WITH_ARM
@@ -82,8 +90,8 @@ Servo servoBase, servoLift, servoGripper;
 #define SERVO_GRIPPER_PIN 13
 
 // ====== Analog IR thresholds (per sensor, aligned to IR_pins order) ======
-int IR_THRESH_LO[num_sensors] = {100,900,100,1701,2900,2000,80,350};
-int IR_THRESH_HI[num_sensors] = {160,1000,150,2464,3000,2662,130,450};
+int IR_THRESH_LO[num_sensors] = {100,900,100,1701,3400,2000,80,350};
+int IR_THRESH_HI[num_sensors] = {160,1000,150,2464,3500,2662,130,450};
 // Remember last on/off state to apply hysteresis
 static uint8_t irState[num_sensors] = {0};
 
@@ -137,6 +145,10 @@ const int SERVO_MIN_US = 500;
 const int SERVO_MAX_US = 2400;
 const int ANG_MIN = 0, ANG_MAX = 180;
 
+const int GRIPPER_MIN_US = 600;
+const int GRIPPER_MAX_US = 2350;
+
+
 // ====== LCD helpers ======
 const char* modeShort(Mode m) {
   switch (m) {
@@ -179,6 +191,12 @@ void setup() {
   pinMode(motor_right_forward, OUTPUT);
   pinMode(motor_right_backward, OUTPUT);
 
+  // ---- added: attach LEDC PWM to motor pins (pin-based API, no channels needed) ----
+  ledcAttach(motor_left_forward,   LEDC_MOTOR_FREQ, LEDC_MOTOR_RES);
+  ledcAttach(motor_left_backward,  LEDC_MOTOR_FREQ, LEDC_MOTOR_RES);
+  ledcAttach(motor_right_forward,  LEDC_MOTOR_FREQ, LEDC_MOTOR_RES);
+  ledcAttach(motor_right_backward, LEDC_MOTOR_FREQ, LEDC_MOTOR_RES);
+
   // Ultrasonic (front dual-pin)
   pinMode(ULTRA_FRONT_TRIG, OUTPUT);
   pinMode(ULTRA_FRONT_ECHO, INPUT);
@@ -186,6 +204,7 @@ void setup() {
   // Magnet sensor pins (external pull-ups → plain INPUT)
   pinMode(MAG1_PIN, INPUT);
   pinMode(MAG2_PIN, INPUT);
+  pinMode(MAG3_PIN, INPUT);
 
   // allocate PWM timers for servos (ESP32 has 4 general-purpose PWM timers)
   ESP32PWM::allocateTimer(0);
@@ -201,12 +220,14 @@ void setup() {
   // Attach with safe pulse range
   servoBase.attach(SERVO_BASE_PIN, SERVO_MIN_US, SERVO_MAX_US);
   servoLift.attach(SERVO_LIFT_PIN, SERVO_MIN_US, SERVO_MAX_US);
-  servoGripper.attach(SERVO_GRIPPER_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  servoGripper.attach(SERVO_GRIPPER_PIN, GRIPPER_MIN_US, GRIPPER_MAX_US);
 
   // Neutral pose
   servoBase.write(10);
-  servoLift.write(170);
-  servoGripper.write(15); // open
+  servoLift.write(180);
+  delay(500);
+  servoGripper.write(5); // open
+  //delay(1000);
 
   // Button
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -264,7 +285,8 @@ void loop() {
       lineDetectMode();
       break;
 
-    case ROBOT_ARM: 
+    case ROBOT_ARM:
+      RobotArmMode(); 
       break;
 
 
@@ -313,6 +335,23 @@ void lineFollowWithArmMode() {
   delay(10);
 }
 
+// ========== Mode: ROBOT ARM ==========
+void RobotArmMode() {
+  if (isObstacleDetected()) {
+    stopmotors();
+    Serial.println("🦾 Obstacle detected → grabbing...");
+    delay(GRAB_PAUSE_MS);
+    armGrabObject();
+    delay(GRAB_PAUSE_MS);
+
+    integral = 0; previous_error = 0;
+
+    Serial.println("✅ Grab sequence complete. ");
+    return;
+  }
+
+}
+
 // ========== PID step (shared) ==========
 void lineFollowPIDStep() {
   float position = readSensors();
@@ -325,8 +364,8 @@ void lineFollowPIDStep() {
   correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
   previous_error = error;
 
-  int left_speed  = (int)constrain(BASE_SPEED_NORMAL + correction,  0, MAX_PWM);
-  int right_speed = (int)constrain(BASE_SPEED_NORMAL - correction,  0, MAX_PWM);
+  int left_speed  = (int)constrain(BASE_SPEED_NORMAL + correction,  0, MAX_PWM)+offsetleft;
+  int right_speed = (int)constrain(BASE_SPEED_NORMAL - correction,  0, MAX_PWM)+offsetright;
 
   Serial.print(left_speed);
   Serial.print(" ");
@@ -417,7 +456,7 @@ bool isLineEnded() {
 // ========== Ultrasonic / Obstacle ==========
 bool isObstacleDetected() {
   long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG, ULTRA_FRONT_ECHO);
-  //long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG);
+  // long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG);
   return (d > 0 && d < OBSTACLE_DISTANCE_CM);
 }
 
@@ -434,7 +473,6 @@ long readUltrasonicDistanceCM(int trigPin, int echoPin) {
 }
 
 // long readUltrasonicDistanceCM(int trigPin) {
-//   // Send 10µs trigger
 //   pinMode(trigPin, OUTPUT);
 //   digitalWrite(trigPin, LOW);
 //   delayMicroseconds(2);
@@ -442,13 +480,13 @@ long readUltrasonicDistanceCM(int trigPin, int echoPin) {
 //   delayMicroseconds(10);
 //   digitalWrite(trigPin, LOW);
 
-//   // Listen for echo on the same pin
 //   pinMode(trigPin, INPUT);
-//   // 30ms timeout ≈ ~5m max range (tweak if you like)
-//   unsigned long dur = pulseIn(trigPin, HIGH, 30000UL);
-//   if (dur == 0) return -1;               // no echo / timeout
-//   return (long)(dur * 0.034f / 2.0f);    // µs → cm
+//   delayMicroseconds(50);                 // allow line to settle
+//   unsigned long dur = pulseIn(trigPin, HIGH, 40000UL); // 40ms timeout
+//   if (dur == 0) return -1;
+//   return (long)(dur * 0.034f / 2.0f);
 // }
+
 
 
 // ====== Magnet Sensor: read & decode pattern (DIGITAL, active-LOW) ======
@@ -456,30 +494,31 @@ uint8_t readMagPattern() {
   // external pull-ups: idle=HIGH, active=LOW → invert so "present"=1
   uint8_t b1 = !digitalRead(MAG1_PIN); // LSB
   uint8_t b2 = !digitalRead(MAG2_PIN); // MSB
-  return (b2 << 1) | b1;
-}
-
-Mode decodeMagPattern(uint8_t pattern) {
-  switch (pattern) {
-    case 0b11: return LINE_FOLLOW;
-    case 0b10: return OBSTACLE_AVOID;
-    case 0b01: return LINE_FOLLOW_WITH_ARM;
-    case 0b00: default: return NO_MODE;
-  }
+  uint8_t b3 = !digitalRead(MAG3_PIN);
+  return (b3<<2) | (b2 << 1) | b1;
 }
 
 // Mode decodeMagPattern(uint8_t pattern) {
 //   switch (pattern) {
-//     case 0b111: return LINE_FOLLOW;
-//     case 0b110: return OBSTACLE_AVOID;
-//     case 0b101: return LINE_FOLLOW_WITH_ARM;
-//     case 0b100: return DISTANCE_MEASURE;
-//     case 0b011: return MOTOR_CONTROL;
-//     case 0b010: return LINE_DETECT;
-//     case 0b001: return ROBOT_ARM;
-//     case 0b000: default: return NO_MODE;
+//     case 0b11: return LINE_FOLLOW;
+//     case 0b10: return OBSTACLE_AVOID;
+//     case 0b01: return LINE_FOLLOW_WITH_ARM;
+//     case 0b00: default: return NO_MODE;
 //   }
 // }
+
+Mode decodeMagPattern(uint8_t pattern) {
+  switch (pattern) {
+    case 0b111: return LINE_DETECT; //pink
+    case 0b110: return OBSTACLE_AVOID; //cream
+    case 0b101: return LINE_FOLLOW_WITH_ARM; //light yello
+    case 0b100: return ROBOT_ARM; //blue
+    case 0b011: return DISTANCE_MEASURE; // light green
+    case 0b010: return MOTOR_CONTROL;//purple
+    case 0b001: return LINE_FOLLOW; //yellow
+    case 0b000: default: return NO_MODE;
+  }
+}
 
 const char* modeName(Mode m) {
   switch (m) {
@@ -508,10 +547,11 @@ void driveMotors(int left, int right) {
   left  = constrain(left,  -MAX_PWM, MAX_PWM);
   right = constrain(right, -MAX_PWM, MAX_PWM);
 
-  analogWrite(motor_left_forward,   left  > 0 ? left  : 0);
-  analogWrite(motor_left_backward,  left  < 0 ? -left : 0);
-  analogWrite(motor_right_forward,  right > 0 ? right : 0);
-  analogWrite(motor_right_backward, right < 0 ? -right: 0);
+  // ---- changed: use LEDC pin-based API ----
+  ledcWrite(motor_left_forward,   left  > 0 ? left  : 0);
+  ledcWrite(motor_left_backward,  left  < 0 ? -left : 0);
+  ledcWrite(motor_right_forward,  right > 0 ? right : 0);
+  ledcWrite(motor_right_backward, right < 0 ? -right: 0);
 
   lastLeft = left;
   lastRight = right;
@@ -540,18 +580,19 @@ void armGrabObject() {
   const uint8_t GRIP_CLOSED = 0;
 
   const uint8_t baseAngles[5] = { 10,  40,  40,  40, 10 };
-  const uint8_t liftAngles[5] = { 170, 140, 140, 140, 170 };
-  const uint8_t gripAngles[5] = { 30, 30, 15, 15, 15 };
+  const uint8_t liftAngles[5] = { 180, 140, 140, 140, 180 };
+  const uint8_t gripAngles[5] = { 30, 30, 30, 5, 5 };
   const uint16_t stepDelayMs[5] = { 1000, 1000, 1000, 1000, 1000 };
 
   for (uint8_t i = 0; i < 5; ++i) {
     Serial.println(i);
-    servoBase.write(   constrain(baseAngles[i],  0, 180) );
-    delay(1000);
-    servoLift.write(   constrain(liftAngles[i],  0, 180) );
-    delay(1000);
-    servoGripper.write(constrain(gripAngles[i],  0, 180) );
-    delay(1000);
+    servoBase.write(baseAngles[i]);
+    // delay(1000);
+    servoLift.write(liftAngles[i]);
+    delay(750);
+    servoGripper.write(gripAngles[i]);
+    delay(500);
+
   }
 }
 
@@ -628,7 +669,7 @@ void distanceMeasureMode() {
     last = now;
 
     long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG, ULTRA_FRONT_ECHO);
-    //long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG);
+    // long d = readUltrasonicDistanceCM(ULTRA_FRONT_TRIG);
 
     // Serial debug
     Serial.print("Distance: ");
@@ -768,6 +809,3 @@ void lineDetectMode() {
 
   delay(150);  // throttle so the LCD stays readable
 }
-
-
-

@@ -30,7 +30,7 @@ const int motor_right_backward = 16;
 // Ultrasonic (front, dual-pin like HC-SR04)
 #define ULTRA_FRONT_TRIG 23
 #define ULTRA_FRONT_ECHO 12
-#define OBSTACLE_DISTANCE_CM 15
+#define OBSTACLE_DISTANCE_CM 16
 
 // ---- Magnet Sensor (2 digital channels, external pull-ups, active-LOW) ----
 #define MAG1_PIN 14 
@@ -90,8 +90,8 @@ Servo servoBase, servoLift, servoGripper;
 #define SERVO_GRIPPER_PIN 13
 
 // ====== Analog IR thresholds (per sensor, aligned to IR_pins order) ======
-int IR_THRESH_LO[num_sensors] = {100,900,100,1701,3400,2000,80,350};
-int IR_THRESH_HI[num_sensors] = {160,1000,150,2464,3500,2662,130,450};
+int IR_THRESH_LO[num_sensors] = {100,900,100,1701,3700,2500,80,350};
+int IR_THRESH_HI[num_sensors] = {160,1000,150,2464,3800,2662,130,450};
 // Remember last on/off state to apply hysteresis
 static uint8_t irState[num_sensors] = {0};
 
